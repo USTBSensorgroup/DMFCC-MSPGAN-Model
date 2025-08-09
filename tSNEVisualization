@@ -1,0 +1,61 @@
+import torch
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+import numpy as np
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+# 1. Set up class labels (must match ImageFolder order)
+class_names = ['BG', 'WT', 'WK', 'SK', 'Digging', 'Knocking']
+
+def visualize_tsne(model, data_dir, batch_size=32, device=None):
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.eval()
+    model.to(device)
+
+    # 2. Define transforms (same as training)
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor()
+    ])
+
+    # 3. Load the dataset (ImageFolder assigns class indices automatically)
+    dataset = datasets.ImageFolder(root=data_dir, transform=transform)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    # 4. Extract features and labels
+    features = []
+    labels = []
+
+    with torch.no_grad():
+        for images, targets in tqdm(dataloader, desc="Extracting features"):
+            images = images.to(device)
+            # Forward pass only up to the feature extractor
+            feats = model.features(images)
+            pooled = torch.nn.functional.adaptive_avg_pool2d(feats, (1, 1))
+            pooled = pooled.view(pooled.size(0), -1)  # Flatten
+            features.append(pooled.cpu().numpy())
+            labels.append(targets.cpu().numpy())
+
+    # 5. Stack all features and labels
+    features_np = np.vstack(features)
+    labels_np = np.hstack(labels)
+
+    # 6. Apply t-SNE
+    tsne = TSNE(n_components=2, random_state=42, perplexity=30, n_iter=1000)
+    tsne_results = tsne.fit_transform(features_np)
+
+    # 7. Plot
+    plt.figure(figsize=(10, 7))
+    for i, label in enumerate(np.unique(labels_np)):
+        idx = labels_np == label
+        plt.scatter(tsne_results[idx, 0], tsne_results[idx, 1], label=class_names[label], alpha=0.6)
+
+    plt.legend()
+    plt.title("t-SNE Visualization of Feature Representations")
+    plt.xlabel("Dimension 1")
+    plt.ylabel("Dimension 2")
+    plt.grid(True)
+    plt.show()
