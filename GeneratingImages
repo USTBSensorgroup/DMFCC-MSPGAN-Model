@@ -1,0 +1,71 @@
+mport torch
+import os
+from torchvision.utils import save_image
+from torchvision import transforms
+import torch.nn as nn
+
+# ----------------------
+# Set parameters
+# ----------------------
+LATENT_DIM = 128
+IMAGE_SIZE = 64
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DATA_PATH = 'E:/KAMANGA/RESEARCH/codes/'
+MODEL_PATH = os.path.join(DATA_PATH, 'generator.pth')
+OUTPUT_PATH = os.path.join(DATA_PATH, 'generated_images.png')
+NUM_SAMPLES = 16
+
+# ----------------------
+# Define Generator class (must match your training code)
+# ----------------------
+class Generator(nn.Module):
+    def __init__(self, latent_dim):
+        super().__init__()
+        self.init_size = IMAGE_SIZE // 16
+        self.fc = nn.Sequential(
+            nn.Linear(latent_dim, 512 * self.init_size * self.init_size)
+        )
+        self.conv_blocks = nn.Sequential(
+            nn.BatchNorm2d(512),
+            nn.Upsample(scale_factor=2),
+            nn.Conv2d(512, 256, 3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Upsample(scale_factor=2),
+            nn.Conv2d(256, 128, 3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Upsample(scale_factor=2),
+            nn.Conv2d(128, 64, 3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Upsample(scale_factor=2),
+            nn.Conv2d(64, 3, 3, stride=1, padding=1),
+            nn.Tanh()
+        )
+
+    def forward(self, z):
+        out = self.fc(z)
+        out = out.view(out.shape[0], 512, self.init_size, self.init_size)
+        img = self.conv_blocks(out)
+        return img
+
+# ----------------------
+# Load generator
+# ----------------------
+generator = Generator(LATENT_DIM).to(DEVICE)
+generator.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+generator.eval()
+
+# ----------------------
+# Generate images
+# ----------------------
+with torch.no_grad():
+    noise = torch.randn(NUM_SAMPLES, LATENT_DIM, device=DEVICE)
+    fake_images = generator(noise).cpu()
+    save_image(fake_images, OUTPUT_PATH, normalize=True, nrow=4)
+
+print(f"Generated images saved to: {OUTPUT_PATH}")
