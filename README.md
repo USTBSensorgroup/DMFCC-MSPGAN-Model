@@ -1,5 +1,10 @@
-# Performance-Enhancement-of--OTDR-Event-Classification-via-Dynamic-MFCCs-and-Augmentation
-Official implementation of the paper "Performance Enhancement of Φ-OTDR Event Classification via Dynamic MFCCs and Multi-Scale Discriminator-Based FastGAN Data Augmentation".  This repository contains the complete pipeline for reproducing the results, including:  Preprocessing raw Φ-OTDR vibration signals  Dynamic MFCC (DMFCC) 
+Official implementation of the paper "Performance Enhancement of Φ-OTDR Event Classification via Dynamic MFCCs and Multi-Scale Discriminator-Based FastGAN Data Augmentation". This repository contains the complete pipeline for reproducing the results, including:
+
+Preprocessing raw Φ-OTDR vibration signals
+
+Dynamic MFCC (DMFCC) extraction
+
+Note: The full source code will be made publicly available after the completion of the main project and following clearance from the university.
 #1 Training The MSPGAN models
 
 first: Run the MSPGAN_Training`function
