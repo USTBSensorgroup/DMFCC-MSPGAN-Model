@@ -1,0 +1,63 @@
+import torch
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+from sklearn.metrics import confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from tqdm import tqdm
+
+# Class names (in order of ImageFolder)
+class_names = ['Background', 'Watering', 'Walking', 'Shaking', 'Digging', 'Knocking']
+
+def plot_six_confusion_matrices(model, data_dir, batch_size=32, device=None):
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.eval()
+    model.to(device)
+
+    # Transforms for input images
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor()
+    ])
+
+    # Load dataset
+    dataset = datasets.ImageFolder(root=data_dir, transform=transform)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for images, labels in tqdm(dataloader, desc="Predicting"):
+            images = images.to(device)
+            outputs = model(images)
+            _, preds = torch.max(outputs, 1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    # Create full confusion matrix
+    cm = confusion_matrix(all_labels, all_preds, labels=list(range(len(class_names))))
+
+    # Plot 6 one-vs-all confusion matrices
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10))
+
+    for i in range(6):
+        # Binary confusion matrix for class i
+        y_true_binary = [1 if y == i else 0 for y in all_labels]
+        y_pred_binary = [1 if y == i else 0 for y in all_preds]
+
+        cm_bin = confusion_matrix(y_true_binary, y_pred_binary, labels=[0, 1])
+
+        ax = axs[i // 3, i % 3]
+        sns.heatmap(cm_bin, annot=True, fmt='d', cmap='Blues', ax=ax, cbar=False)
+        ax.set_title(f'Class: {class_names[i]}')
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('True')
+        ax.set_xticklabels(['Other', class_names[i]])
+        ax.set_yticklabels(['Other', class_names[i]])
+
+    plt.tight_layout()
+    plt.suptitle("One-vs-All Confusion Matrices", fontsize=16, y=1.03)
+    plt.show()
