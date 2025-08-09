@@ -1,0 +1,134 @@
+train_classifier.py
+Train MobileNetV3-Small on DMFCC images for Φ-OTDR event classification.
+
+Assumptions:
+- Dataset directory structure:
+    dataset/
+        WK/
+        WT/
+        DG/
+        SK/
+        KN/
+        BG/
+- Images in each folder are DMFCCs (PNG/JPG) generated from preprocessing step.
+- Hyperparameters follow manuscript settings:
+    batch size = 25
+    epochs = 75
+    optimizer = Adam (lr=0.001, betas=(0.9, 0.999))
+    L2 weight decay = 1e-4
+"""
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms, models
+from torch.utils.data import DataLoader
+import os
+
+# -----------------------------
+# Configurations (matches paper)
+# -----------------------------
+DATA_DIR = "dataset"      # change to your dataset path
+BATCH_SIZE = 25
+EPOCHS = 75
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 1e-4
+NUM_CLASSES = 6
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MODEL_SAVE_PATH = "mobilenetv3_small_dmfcc.pth"
+
+# -----------------------------
+# Data transforms
+# -----------------------------
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),          # MobileNetV3 input size
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5, 0.5, 0.5],  # assuming 3-channel DMFCC images
+                         std=[0.5, 0.5, 0.5])
+])
+
+# -----------------------------
+# Dataset and loaders
+# -----------------------------
+train_dataset = datasets.ImageFolder(root=os.path.join(DATA_DIR, "train"), transform=transform)
+val_dataset   = datasets.ImageFolder(root=os.path.join(DATA_DIR, "val"),   transform=transform)
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
+val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
+
+# -----------------------------
+# Model: MobileNetV3-Small
+# -----------------------------
+model = models.mobilenet_v3_small(weights=None)  # no pretrained weights for fairness
+model.classifier[3] = nn.Linear(model.classifier[3].in_features, NUM_CLASSES)
+model = model.to(DEVICE)
+
+# -----------------------------
+# Loss and optimizer
+# -----------------------------
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+
+# -----------------------------
+# Training loop
+# -----------------------------
+def train_one_epoch(epoch):
+    model.train()
+    running_loss = 0.0
+    correct, total = 0, 0
+
+    for images, labels in train_loader:
+        images, labels = images.to(DEVICE), labels.to(DEVICE)
+
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item() * images.size(0)
+        _, predicted = outputs.max(1)
+        total += labels.size(0)
+        correct += predicted.eq(labels).sum().item()
+
+    epoch_loss = running_loss / len(train_dataset)
+    epoch_acc = 100. * correct / total
+    print(f"Epoch [{epoch+1}/{EPOCHS}] Train Loss: {epoch_loss:.4f} | Train Acc: {epoch_acc:.2f}%")
+
+def validate():
+    model.eval()
+    running_loss = 0.0
+    correct, total = 0, 0
+
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images, labels = images.to(DEVICE), labels.to(DEVICE)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            running_loss += loss.item() * images.size(0)
+            _, predicted = outputs.max(1)
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+
+    epoch_loss = running_loss / len(val_dataset)
+    epoch_acc = 100. * correct / total
+    print(f"Validation Loss: {epoch_loss:.4f} | Validation Acc: {epoch_acc:.2f}%")
+    return epoch_acc
+
+# -----------------------------
+# Main training process
+# -----------------------------
+best_acc = 0.0
+for epoch in range(EPOCHS):
+    train_one_epoch(epoch)
+    acc = validate()
+
+    # Save best model
+    if acc > best_acc:
+        best_acc = acc
+        torch.save(model.state_dict(), MODEL_SAVE_PATH)
+        print(f"Best model saved with accuracy: {best_acc:.2f}%")
+
+print("Training complete.")
+print(f"Best Validation Accuracy: {best_acc:.2f}%")
