@@ -15,13 +15,14 @@ def visualize_tsne(model, data_dir, batch_size=32, device=None):
     model.eval()
     model.to(device)
 
-    # 2. Define transforms (same as training)
+    # 2. Define transforms (match training: 227x227 + normalization)
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
+        transforms.Resize((227, 227)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
 
-    # 3. Load the dataset (ImageFolder assigns class indices automatically)
+    # 3. Load the dataset
     dataset = datasets.ImageFolder(root=data_dir, transform=transform)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
@@ -32,10 +33,10 @@ def visualize_tsne(model, data_dir, batch_size=32, device=None):
     with torch.no_grad():
         for images, targets in tqdm(dataloader, desc="Extracting features"):
             images = images.to(device)
-            # Forward pass only up to the feature extractor
+            # Extract features from model.features (MobileNetV3 feature extractor)
             feats = model.features(images)
             pooled = torch.nn.functional.adaptive_avg_pool2d(feats, (1, 1))
-            pooled = pooled.view(pooled.size(0), -1)  # Flatten
+            pooled = pooled.view(pooled.size(0), -1)  # Flatten to (batch_size, feature_dim)
             features.append(pooled.cpu().numpy())
             labels.append(targets.cpu().numpy())
 
@@ -47,14 +48,14 @@ def visualize_tsne(model, data_dir, batch_size=32, device=None):
     tsne = TSNE(n_components=2, random_state=42, perplexity=30, n_iter=1000)
     tsne_results = tsne.fit_transform(features_np)
 
-    # 7. Plot
+    # 7. Plot t-SNE results
     plt.figure(figsize=(10, 7))
     for i, label in enumerate(np.unique(labels_np)):
         idx = labels_np == label
         plt.scatter(tsne_results[idx, 0], tsne_results[idx, 1], label=class_names[label], alpha=0.6)
 
     plt.legend()
-    plt.title("t-SNE Visualization of Feature Representations")
+    plt.title("t-SNE Visualization of MobileNetV3-Small Features")
     plt.xlabel("Dimension 1")
     plt.ylabel("Dimension 2")
     plt.grid(True)
