@@ -1,6 +1,10 @@
 import os
+import math
+import random
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms, utils
 import torchvision
@@ -9,18 +13,34 @@ from tqdm import tqdm
 from IPython.display import clear_output
 
 # ========================
-# 1. Hyperparameters
+# 0. Repro / Device / Paths
+# ========================
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Using device: {DEVICE}')
+
+DATA_PATH = 'E:/KAMANGA/RESEARCH/codes/data'  # <-- your dataset path
+os.makedirs("images/fake", exist_ok=True)
+os.makedirs("images/real", exist_ok=True)
+os.makedirs("checkpoints", exist_ok=True)
+
+# ========================
+# 1. Hyperparameters (MSPGAN-style)
 # ========================
 EPOCHS = 150
 BATCH_SIZE = 1
-IMAGE_SIZE = 224
-LATENT_DIM = 128
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f'Using device: {DEVICE}')
-DATA_PATH = 'E:/KAMANGA/RESEARCH/codes/data'
-
-os.makedirs("images/fake", exist_ok=True)
-os.makedirs("images/real", exist_ok=True)
+IMAGE_SIZE = 227
+PATCH_SIZES = [70, 170]
+LATENT_DIM = BATCH_SIZE  # per Table 2 ("= no. of samples to generate")
+G_LR = 2e-4
+D_LR = 1e-4
+BETAS = (0.5, 0.999)
+NUM_WORKERS = 4
+G_TRAIN_STEPS = 2
 
 # ========================
 # 2. Data Preparation
@@ -33,18 +53,34 @@ transform = transforms.Compose([
 ])
 
 dataset = datasets.ImageFolder(DATA_PATH, transform=transform)
-dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
+dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True,
+                        num_workers=NUM_WORKERS, pin_memory=True, drop_last=True)
 
 # ========================
-# 3. Generator & Discriminator
+# 3. Helper: Random patch crop
+# ========================
+def random_patch_batch(imgs: torch.Tensor, patch_size: int):
+    B, C, H, W = imgs.shape
+    patches = []
+    for i in range(B):
+        top = random.randint(0, H - patch_size)
+        left = random.randint(0, W - patch_size)
+        patch = imgs[i:i+1, :, top:top+patch_size, left:left+patch_size]
+        patches.append(patch)
+    return torch.cat(patches, dim=0)
+
+# ========================
+# 4. Generator
 # ========================
 class Generator(nn.Module):
-    def __init__(self, latent_dim):
+    def __init__(self, latent_dim: int, img_size: int = IMAGE_SIZE):
         super().__init__()
-        self.init_size = IMAGE_SIZE // 16
-        self.fc = nn.Sequential(
-            nn.Linear(latent_dim, 512 * self.init_size * self.init_size)
-        )
+        self.img_size = img_size
+        self.init_size = img_size // 16
+        if self.init_size < 1:
+            self.init_size = 1
+
+        self.fc = nn.Linear(latent_dim, 512 * self.init_size * self.init_size)
 
         self.conv_blocks = nn.Sequential(
             nn.BatchNorm2d(512),
@@ -64,186 +100,175 @@ class Generator(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
 
             nn.Upsample(scale_factor=2),
-            nn.Conv2d(64, 3, 3, stride=1, padding=1),
+            nn.Conv2d(64, 32, 3, stride=1, padding=1),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(32, 3, 3, stride=1, padding=1),
             nn.Tanh()
         )
 
     def forward(self, z):
         out = self.fc(z)
-        out = out.view(out.shape[0], 512, self.init_size, self.init_size)
+        B = z.size(0)
+        out = out.view(B, 512, self.init_size, self.init_size)
         img = self.conv_blocks(out)
+        if img.shape[2] != self.img_size or img.shape[3] != self.img_size:
+            img = F.interpolate(img, size=(self.img_size, self.img_size), mode='bilinear', align_corners=False)
         return img
 
-
-class Discriminator(nn.Module):
+# ========================
+# 5. Single Multi-Scale Discriminator
+# ========================
+class MultiScaleDiscriminator(nn.Module):
     def __init__(self):
         super().__init__()
-        def block(in_filters, out_filters, bn=True):
-            layers = [nn.Conv2d(in_filters, out_filters, 4, stride=2, padding=1)]
+        # Shared backbone
+        def block(in_c, out_c, bn=True):
+            layers = [nn.Conv2d(in_c, out_c, kernel_size=4, stride=2, padding=1)]
             if bn:
-                layers.append(nn.BatchNorm2d(out_filters))
+                layers.append(nn.BatchNorm2d(out_c))
             layers.append(nn.LeakyReLU(0.2, inplace=True))
             return layers
 
-        self.model = nn.Sequential(
+        self.backbone = nn.Sequential(
             *block(3, 64, bn=False),
             *block(64, 128),
             *block(128, 256),
-            *block(256, 512),
-            nn.Conv2d(512, 1, 4, stride=1, padding=0),
-            nn.Flatten(),
+            *block(256, 512)
+        )
+
+        # Two heads for 70x70 and 170x170
+        self.head70 = nn.Sequential(
+            nn.Conv2d(512, 1, kernel_size=4, stride=1, padding=1),
+            nn.Sigmoid()
+        )
+        self.head170 = nn.Sequential(
+            nn.Conv2d(512, 1, kernel_size=8, stride=1, padding=1),
             nn.Sigmoid()
         )
 
-    def forward(self, img):
-        return self.model(img)
+    def forward(self, x70, x170):
+        # x70: (B,3,70,70), x170: (B,3,170,170)
+        f70 = self.backbone(x70)
+        f170 = self.backbone(x170)
+        out70 = self.head70(f70)
+        out170 = self.head170(f170)
+        return out70, out170
 
 # ========================
-# 4. Initialize Models
+# 6. Initialize Models, Losses, Optimizers
 # ========================
-generator = Generator(LATENT_DIM).to(DEVICE)
-discriminator = Discriminator().to(DEVICE)
+generator = Generator(LATENT_DIM, img_size=IMAGE_SIZE).to(DEVICE)
+discriminator = MultiScaleDiscriminator().to(DEVICE)
 
 criterion = nn.BCELoss()
-optim_G = torch.optim.Adam(generator.parameters(), lr=2e-4, betas=(0.5, 0.999))
-optim_D = torch.optim.Adam(discriminator.parameters(), lr=1e-4, betas=(0.5, 0.999))  # Slower D LR
+optim_G = torch.optim.Adam(generator.parameters(), lr=G_LR, betas=BETAS)
+optim_D = torch.optim.Adam(discriminator.parameters(), lr=D_LR, betas=BETAS)
 
 # ========================
-# 5. Training Loop
+# 7. Training loop
 # ========================
 g_losses, d_losses = [], []
-real_accuracies = []
-fake_accuracies = []
+real_accuracies, fake_accuracies = [], []
 fixed_noise = torch.randn(16, LATENT_DIM, device=DEVICE)
 
 for epoch in range(EPOCHS):
     loop = tqdm(dataloader, desc=f"Epoch [{epoch+1}/{EPOCHS}]")
-    g_loss_epoch = 0
-    d_loss_epoch = 0
-    real_correct = 0
-    fake_correct = 0
-    total_real = 0
-    total_fake = 0
+    running_d_loss = 0.0
+    running_g_loss = 0.0
+    epoch_real_acc = 0.0
+    epoch_fake_acc = 0.0
+    count_batches = 0
 
     for real_imgs, _ in loop:
         real_imgs = real_imgs.to(DEVICE)
         batch_size = real_imgs.size(0)
+        count_batches += 1
 
-        # === Add noise to images ===
-        noise_real = 0.05 * torch.randn_like(real_imgs)
-        noise_fake = 0.05 * torch.randn_like(real_imgs)
+        noise_real = 0.05 * torch.randn_like(real_imgs).to(DEVICE)
+        z = torch.randn(batch_size, LATENT_DIM, device=DEVICE)
+        fake_imgs = generator(z)
 
-        # === Generate fake images ===
-        noise = torch.randn(batch_size, LATENT_DIM, device=DEVICE)
-        fake_imgs = generator(noise)
+        # Extract patches
+        real70 = random_patch_batch(real_imgs + noise_real, 70)
+        fake70 = random_patch_batch(fake_imgs.detach(), 70)
+        real170 = random_patch_batch(real_imgs + noise_real, 170)
+        fake170 = random_patch_batch(fake_imgs.detach(), 170)
 
-        # === Label smoothing ===
-        valid = torch.full((batch_size, 1), 0.9, device=DEVICE)  # Real labels = 0.9
-        fake = torch.zeros(batch_size, 1, device=DEVICE)
+        # Train Discriminator
+        pred_real70, pred_real170 = discriminator(real70, real170)
+        pred_fake70, pred_fake170 = discriminator(fake70, fake170)
 
-        # === Train Discriminator ===
-        real_preds = discriminator(real_imgs + noise_real)
-        fake_preds = discriminator(fake_imgs.detach() + noise_fake)
+        valid_real70 = torch.full_like(pred_real70, 0.9, device=DEVICE)
+        valid_real170 = torch.full_like(pred_real170, 0.9, device=DEVICE)
+        fake_label70 = torch.zeros_like(pred_fake70, device=DEVICE)
+        fake_label170 = torch.zeros_like(pred_fake170, device=DEVICE)
 
-        real_loss = criterion(real_preds, valid)
-        fake_loss = criterion(fake_preds, fake)
-        d_loss = real_loss + fake_loss
+        loss_real70 = criterion(pred_real70, valid_real70)
+        loss_real170 = criterion(pred_real170, valid_real170)
+        loss_fake70 = criterion(pred_fake70, fake_label70)
+        loss_fake170 = criterion(pred_fake170, fake_label170)
 
-        real_correct += (real_preds >= 0.5).sum().item()
-        fake_correct += (fake_preds < 0.5).sum().item()
-        total_real += batch_size
-        total_fake += batch_size
-
+        d_loss = loss_real70 + loss_real170 + loss_fake70 + loss_fake170
         optim_D.zero_grad()
         d_loss.backward()
         optim_D.step()
 
-        # === Train Generator twice per step ===
-        gen_loss_total = 0
-        for _ in range(2):
-            noise = torch.randn(batch_size, LATENT_DIM, device=DEVICE)
-            fake_imgs = generator(noise)
-            gen_loss = criterion(discriminator(fake_imgs + noise_fake), valid)
+        running_d_loss += d_loss.item()
+        real_acc = ((pred_real70 >= 0.5).float().mean().item() + (pred_real170 >= 0.5).float().mean().item()) / 2
+        fake_acc = ((pred_fake70 < 0.5).float().mean().item() + (pred_fake170 < 0.5).float().mean().item()) / 2
+        epoch_real_acc += real_acc
+        epoch_fake_acc += fake_acc
+
+        # Train Generator
+        g_loss_total = 0.0
+        for _ in range(G_TRAIN_STEPS):
+            z = torch.randn(batch_size, LATENT_DIM, device=DEVICE)
+            gen_imgs = generator(z)
+            fake70_g = random_patch_batch(gen_imgs, 70)
+            fake170_g = random_patch_batch(gen_imgs, 170)
+            pred_fake70_g, pred_fake170_g = discriminator(fake70_g, fake170_g)
+            valid_label70 = torch.full_like(pred_fake70_g, 0.9, device=DEVICE)
+            valid_label170 = torch.full_like(pred_fake170_g, 0.9, device=DEVICE)
+            g_loss = criterion(pred_fake70_g, valid_label70) + criterion(pred_fake170_g, valid_label170)
             optim_G.zero_grad()
-            gen_loss.backward()
+            g_loss.backward()
             optim_G.step()
-            gen_loss_total += gen_loss.item()
+            g_loss_total += g_loss.item()
 
-        g_loss_epoch += gen_loss_total / 2
-        d_loss_epoch += d_loss.item()
-        loop.set_postfix(G_loss=gen_loss_total / 2, D_loss=d_loss.item())
+        running_g_loss += g_loss_total / G_TRAIN_STEPS
+        loop.set_postfix(D_loss=d_loss.item(), G_loss=g_loss_total / G_TRAIN_STEPS)
 
-    # Save metrics
-    g_losses.append(g_loss_epoch / len(dataloader))
-    d_losses.append(d_loss_epoch / len(dataloader))
-    real_accuracies.append(real_correct / total_real)
-    fake_accuracies.append(fake_correct / total_fake)
+    avg_d_loss = running_d_loss / count_batches
+    avg_g_loss = running_g_loss / count_batches
+    avg_real_acc = (epoch_real_acc / count_batches) * 100
+    avg_fake_acc = (epoch_fake_acc / count_batches) * 100
+    g_losses.append(avg_g_loss)
+    d_losses.append(avg_d_loss)
+    real_accuracies.append(avg_real_acc)
+    fake_accuracies.append(avg_fake_acc)
 
-    # Save generated and real image grids
+    print(f"\nEpoch {epoch+1}: G_loss={avg_g_loss:.4f}, D_loss={avg_d_loss:.4f}, RealAcc={avg_real_acc:.2f}%, FakeAcc={avg_fake_acc:.2f}%")
+
+    # Save image grids
     with torch.no_grad():
         fake_sample = generator(fixed_noise).detach().cpu()
         real_sample = next(iter(dataloader))[0][:16].detach().cpu()
-
-        grid_fake = torchvision.utils.make_grid(fake_sample, normalize=True, nrow=4)
-        grid_real = torchvision.utils.make_grid(real_sample, normalize=True, nrow=4)
-
-        utils.save_image(grid_fake, f"images/fake/epoch_{epoch+1}.png")
-        utils.save_image(grid_real, f"images/real/epoch_{epoch+1}.png")
-
-        if epoch == 0 or epoch == EPOCHS - 1:
-            clear_output(wait=True)
-            fig, axs = plt.subplots(1, 2, figsize=(10, 5))
-            axs[0].imshow(grid_real.permute(1, 2, 0))
-            axs[0].set_title("Real Images")
-            axs[0].axis("off")
-
-            axs[1].imshow(grid_fake.permute(1, 2, 0))
-            axs[1].set_title("Generated Images")
-            axs[1].axis("off")
-
-            plt.suptitle(
-                f"Epoch {epoch+1}\nReal Acc: {real_accuracies[-1]*100:.2f}% | Fake Acc: {fake_accuracies[-1]*100:.2f}%"
-            )
-            plt.show()
+        utils.save_image(fake_sample, f"images/fake/epoch_{epoch+1}.png", normalize=True, nrow=4)
+        utils.save_image(real_sample, f"images/real/epoch_{epoch+1}.png", normalize=True, nrow=4)
 
 # ========================
-# 6. Plot Loss & Accuracy Curves
+# 8. Plot Loss & Accuracy
 # ========================
 plt.figure(figsize=(15, 5))
-
 plt.subplot(1, 2, 1)
 plt.plot(g_losses, label='Generator Loss')
 plt.plot(d_losses, label='Discriminator Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.title('Training Loss Curves')
-plt.legend()
-plt.grid()
+plt.legend(); plt.grid(); plt.title('Loss curves')
 
 plt.subplot(1, 2, 2)
-plt.plot(real_accuracies, label='Real Image Accuracy', color='green')
-plt.plot(fake_accuracies, label='Fake Image Accuracy', color='red')
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-plt.title('Discriminator Accuracy')
-plt.legend()
-plt.grid()
-
-plt.tight_layout()
+plt.plot(real_accuracies, label='Real Acc')
+plt.plot(fake_accuracies, label='Fake Acc')
+plt.legend(); plt.grid(); plt.title('Accuracy curves')
 plt.show()
-
-# ========================
-# 7. Save Models
-# ========================
-torch.save(generator.state_dict(), "generator.pth")
-torch.save(discriminator.state_dict(), "discriminator.pth")
-
-# ========================
-# 8. Reload Generator
-# ========================
-generator = Generator(LATENT_DIM).to(DEVICE)
-generator.load_state_dict(torch.load("generator.pth", map_location=DEVICE))
-generator.eval()
-
-
-
