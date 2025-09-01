@@ -1,0 +1,23 @@
+import os
+import numpy as np
+from PIL import Image
+
+def load_images_to_tensor(image_folder, extension='.png'):
+    # List all image files with the given extension
+    image_files = [f for f in os.listdir(image_folder) if f.endswith(extension)]
+    num_images = len(image_files)
+
+    # Read first image to get dimensions
+    sample_image = Image.open(os.path.join(image_folder, image_files[0]))
+    sample_array = np.array(sample_image)
+    height, width, channels = sample_array.shape
+
+    # Preallocate tensor
+    image_tensor = np.zeros((height, width, channels, num_images), dtype=np.uint8)
+
+    # Load all images
+    for i, file_name in enumerate(image_files):
+        img = Image.open(os.path.join(image_folder, file_name))
+        image_tensor[:, :, :, i] = np.array(img)
+
+    return image_tensor, image_files
