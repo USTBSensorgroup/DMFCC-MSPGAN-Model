@@ -1,0 +1,92 @@
+import numpy as np
+import scipy.io
+from scipy.signal import detrend
+from scipy.integrate import cumtrapz
+import matplotlib.pyplot as plt
+from skimage.color import rgb2gray
+from skimage.transform import resize
+from skimage.feature import canny
+import librosa
+
+# -------------------------------
+# Load sample dataset
+# -------------------------------
+mat = scipy.io.loadmat(r'E:\MyResearch\DMFCC-MSPGAN_Research\220104_sys_dig_01_single_data_5.mat')
+decmatrix = mat['data']  # adjust key if necessary
+
+# -------------------------------
+# Parameters
+# -------------------------------
+P = 240           # Period of oscillation
+Fs = 10e6         # Sampling frequency
+Dz = 10           # spatial resolution
+C1 = 1            # first channel
+C2 = 13           # last channel
+
+# -------------------------------
+# Time and channel setup
+# -------------------------------
+Freq = 1 / P
+T = 1 / Fs
+Chan = np.arange(C1, C2)
+C1_location = 0.2
+D = C1_location + C1 * Dz + Chan * Dz
+Dfrac = 43
+Cfrac = round((Dfrac - C1_location - C1 * Dz) / Dz)
+
+rawDAS = decmatrix[:, C1-1:C2-1]  # MATLAB 1-based to Python 0-based
+L = rawDAS.shape[0]
+t = np.arange(L) * T
+
+# -------------------------------
+# Reshaping the data
+# -------------------------------
+engDAS = 116 * rawDAS
+disp = cumtrapz(engDAS, t, axis=0, initial=0)
+disp = detrend(disp, axis=0, type='polynomial', bp=4)
+
+# -------------------------------
+# DMFCC computation
+# -------------------------------
+# Collapse across channels to 1D
+rawSignal = np.mean(decmatrix, axis=1)
+
+# Compute 13 MFCCs
+mfccs = librosa.feature.mfcc(y=rawSignal.astype(float), sr=int(Fs), n_mfcc=13)
+
+# Compute Delta (first derivative) coefficients
+deltas = librosa.feature.delta(mfccs, order=1)
+
+# Compute Delta-Delta (second derivative) coefficients
+deltas_deltas = librosa.feature.delta(mfccs, order=2)
+
+# Concatenate to form DMFCC [frames x 39]
+DMFCC = np.vstack([mfccs, deltas, deltas_deltas]).T
+
+# -------------------------------
+# Visualize DMFCC
+# -------------------------------
+plt.figure(figsize=(8,4))
+plt.imshow(DMFCC.T, aspect='auto', origin='lower')
+plt.title('DMFCC Feature Image')
+plt.xlabel('Frame Index')
+plt.ylabel('Coefficient Index')
+plt.colorbar()
+plt.show()
+
+# Normalize DMFCC
+DMFCC_norm = (DMFCC - DMFCC.min()) / (DMFCC.max() - DMFCC.min())
+
+
+plt.figure(figsize=(6,4))
+plt.imshow(disp.T, aspect='auto', origin='lower')
+plt.axis('off')
+plt.show()
+GrayImage = np.mean(disp.T, axis=2) if disp.ndim == 3 else disp.T
+GrayImage = resize(GrayImage, (227, 227), anti_aliasing=True)
+GrayImage = (GrayImage * 255).astype(np.uint8)
+edgeImage = canny(GrayImage / 255.0)
+plt.figure()
+plt.imshow(edgeImage, cmap='gray')
+plt.axis('off')
+plt.show()
