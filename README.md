@@ -4,18 +4,26 @@ Preprocessing raw Φ-OTDR vibration signals
 
 Dynamic MFCC (DMFCC) extraction
 
-Note: The full source code will be made publicly available after the completion of the main project and following clearance from the university.
-#1 Training The MSPGAN models
+##################################################
+Accessing the two datasets
+##################################################
+The two datasets can be accessed through the following links, when used, the respective papers should be cited appropriately 
 
-first: Run the MSPGAN_Training`function
+1. Cao et al. (2023) dataset: https://github.com/BJTUSensor/
+2. Tomasov et al. (2025) dataset: https://springernature.figshare.com/articles/dataset/Comprehensive_Dataset_for_Event_Classification_Using_Distributed_Acoustic_Sensing_DAS_Systems/27004732
+
+
+##############################################
+Procedures
+##############################################
+1. Loop the function extract_dmfcc_features to produce images representing all 1D files in dataset folders
+2. Run the MSPGAN_Training`function
     This function will train the MSPGAN model, save the sub models and load them for evaluation
-
-#2 Generate synthesis images
+3. Generate synthesis images
 
  Use the GeneratingImages function to generate synthetic  dataset and same them in their respective parent folders (i.e save walking class images in the folder named walking etc.)
 
-
-#3 Training the classification network (DMFCC-MSPGAN )
+4. Training the classification network (DMFCC-MSPGAN ) by Runing the classificationNetTraining(data_dir="path_to/dataset_root", num_epochs=75)
 
 Dataset Folder Structure
 
@@ -28,9 +36,7 @@ dataset_root/
 ├── SK/
 └── WK/
 
-
-first: Run the classificationNetTraining(data_dir="path_to/dataset_root", num_epochs=75)
-
 This will train the model (DMFCC-MSPGAN ), save it and load it
 
-Second: Perform model evaluations by running the provided evaluation functions. follow the paper details and evaluation functions included in this GitHub such as PlotConfusionMatrice, tSNEVisualization etc.
+5. Perform model evaluations by running the provided evaluation functions. follow the paper details and evaluation functions included in this GitHub such as
+PlotConfusionMatrice, tSNEVisualization etc.
